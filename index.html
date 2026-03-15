@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fellowmate — EVI Test v3</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,sans-serif;background:#faf6f0;color:#3d3a36;display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:20px}
+h1{font-size:1.2rem;margin-bottom:4px}
+.sub{font-size:.75rem;color:#8a847a;margin-bottom:20px}
+#status{font-size:.78rem;color:#7a9e7e;font-weight:600;margin-bottom:16px;min-height:24px;text-align:center}
+#status.err{color:#c4836a}
+.cfg{background:white;border-radius:12px;padding:16px;width:min(480px,92vw);margin-bottom:16px;box-shadow:0 2px 8px rgba(0,0,0,.05)}
+.cfg label{font-size:.66rem;font-weight:700;color:#8a847a;display:block;margin-bottom:3px}
+.cfg input{width:100%;padding:8px 12px;border:1.5px solid #e0d5c5;border-radius:8px;font-size:.8rem;margin-bottom:10px;background:#faf6f0}
+.mic{width:80px;height:80px;border-radius:50%;border:3px solid #e0d5c5;font-size:2rem;cursor:pointer;
+  background:white;transition:all .3s;margin-bottom:16px}
+.mic:hover{border-color:#7a9e7e}
+.mic.on{background:#7a9e7e;border-color:#7a9e7e;animation:glow 2s infinite}
+.mic.speak{background:#c9a84c;border-color:#c9a84c;animation:none}
+@keyframes glow{0%,100%{box-shadow:0 0 0 0 rgba(122,158,126,.3)}50%{box-shadow:0 0 0 14px rgba(122,158,126,0)}}
+.chat{width:min(480px,92vw);flex:1;overflow-y:auto;margin-bottom:12px}
+.m{display:flex;gap:8px;margin-bottom:10px}.m.u{flex-direction:row-reverse}
+.b{padding:10px 14px;border-radius:14px;font-size:.82rem;line-height:1.5;max-width:80%}
+.b.a{background:white;border:1px solid #e0d5c5}.b.u{background:#7a9e7e;color:white}
+.i{width:26px;height:26px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:.75rem;flex-shrink:0}
+.i.a{background:#e8f0e8}.i.u{background:#e6f0f8}
+#log{width:min(480px,92vw);background:#333;color:#8f8;border-radius:10px;padding:10px;font-size:.6rem;max-height:140px;overflow-y:auto;font-family:monospace;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<h1>Fellowmate EVI v3</h1>
+<p class="sub">AudioContext fix + echo prevention</p>
+<div id="status">Paste your Hume key, tap mic</div>
+
+<div class="cfg">
+  <label>Hume API Key</label>
+  <input id="hk" type="password" placeholder="Paste your Hume API key here">
+  <label>EVI Config ID</label>
+  <input id="ci" value="f933806f-4107-4d5e-a420-1b81eb97ddc7">
+</div>
+
+<button class="mic" id="mic" onclick="go()">🎙️</button>
+<div class="chat" id="chat"></div>
+<div id="log">---</div>
+
+<script>
+var ws,stream,rec,actx,on=false,speaking=false,chunks=[];
+
+function L(s){var el=document.getElementById('log');el.textContent=time()+' '+s+'\n'+el.textContent.slice(0,3000);console.log(s);}
+function time(){var d=new Date();return d.toLocaleTimeString();}
+function S(s,e){var el=document.getElementById('status');el.textContent=s;el.className=e?'err':'';}
+function btn(s){var b=document.getElementById('mic');b.className='mic'+(s==='on'?' on':s==='speak'?' speak':'');b.textContent=s==='off'?'🎙️':'⏹️';}
+
+function msg(who,txt){
+  var c=document.getElementById('chat'),d=document.createElement('div');
+  d.className='m'+(who==='u'?' u':'');
+  d.innerHTML='<div class="i '+(who==='u'?'u':'a')+'">'+(who==='u'?'🩺':'👩')+'</div><div class="b '+(who==='u'?'u':'a')+'">'+txt+'</div>';
+  c.appendChild(d);c.scrollTop=c.scrollHeight;
+}
+
+// ═══ AUDIO PLAYBACK via AudioContext (beats autoplay policy) ═══
+function initAudio(){
+  if(!actx){
+    actx=new (window.AudioContext||window.webkitAudioContext)();
+    L('AudioContext created (state: '+actx.state+')');
+  }
+  if(actx.state==='suspended')actx.resume();
+}
+
+function playChunks(){
+  if(chunks.length===0){speaking=false;unmuteMic();return;}
+  speaking=true;btn('speak');S('Meena speaking…');
+  muteMic();
+
+  // Merge all base64 chunks into one ArrayBuffer
+  var parts=[];
+  chunks.forEach(function(b64){
+    try{var r=atob(b64),a=new Uint8Array(r.length);for(var i=0;i<r.length;i++)a[i]=r.charCodeAt(i);parts.push(a);}catch(e){}
+  });
+  chunks=[];
+  var total=parts.reduce(function(s,a){return s+a.length;},0);
+  var merged=new Uint8Array(total);
+  var off=0;parts.forEach(function(a){merged.set(a,off);off+=a.length;});
+
+  L('Decoding '+parts.length+' chunks ('+total+' bytes)');
+
+  // Decode and play via AudioContext
+  actx.decodeAudioData(merged.buffer).then(function(buf){
+    var src=actx.createBufferSource();
+    src.buffer=buf;
+    src.connect(actx.destination);
+    src.onended=function(){
+      L('Playback ended');
+      speaking=false;
+      btn('on');
+      unmuteMic();
+    };
+    src.start();
+    L('Playing audio ('+buf.duration.toFixed(1)+'s)');
+  }).catch(function(e){
+    L('Decode FAILED: '+e.message+' — trying Blob fallback');
+    // Fallback: play as blob
+    var blob=new Blob([merged],{type:'audio/mp3'});
+    var url=URL.createObjectURL(blob);
+    var audio=new Audio(url);
+    audio.onended=function(){URL.revokeObjectURL(url);speaking=false;btn('on');unmuteMic();};
+    audio.onerror=function(){speaking=false;btn('on');unmuteMic();};
+    audio.play().catch(function(e2){L('Blob play also failed: '+e2.message);speaking=false;btn('on');unmuteMic();});
+  });
+}
+
+// ═══ MIC MUTE/UNMUTE ═══
+function muteMic(){
+  if(stream)stream.getAudioTracks().forEach(function(t){t.enabled=false;});
+}
+function unmuteMic(){
+  if(stream&&on){
+    stream.getAudioTracks().forEach(function(t){t.enabled=true;});
+    S('Your turn — speak to Meena');
+    L('Mic ON — listening');
+  }
+}
+
+// ═══ WEBSOCKET ═══
+function connect(cb){
+  var key=document.getElementById('hk').value.trim();
+  var cfg=document.getElementById('ci').value.trim();
+  if(!key){S('Enter Hume key',1);return;}
+
+  if(ws)try{ws.close();}catch(e){}
+  chunks=[];speaking=false;
+
+  S('Connecting…');
+  ws=new WebSocket('wss://api.hume.ai/v0/evi/chat?api_key='+encodeURIComponent(key)+'&config_id='+encodeURIComponent(cfg));
+
+  ws.onopen=function(){L('WS OPEN');S('Connected');cb(true);};
+
+  ws.onmessage=function(e){
+    var m;try{m=JSON.parse(e.data);}catch(x){return;}
+
+    if(m.type==='user_message'){
+      if(m.message&&m.message.content){msg('u',m.message.content);L('YOU: '+m.message.content.slice(0,60));}
+      muteMic();// Meena about to speak
+    }
+    else if(m.type==='assistant_message'){
+      if(m.message&&m.message.content){msg('a',m.message.content);L('MEENA: '+m.message.content.slice(0,60));}
+    }
+    else if(m.type==='audio_output'){
+      if(m.data)chunks.push(m.data);
+    }
+    else if(m.type==='assistant_end'){
+      L('assistant_end — '+chunks.length+' audio chunks');
+      if(chunks.length>0)playChunks();
+      else{speaking=false;unmuteMic();}
+    }
+    else if(m.type==='user_interruption'){
+      L('INTERRUPTED');speaking=false;chunks=[];unmuteMic();
+    }
+    else if(m.type==='error'){
+      L('ERR: '+JSON.stringify(m).slice(0,200));
+      S('Error: '+(m.message||m.code||'?'),1);
+    }
+    else{
+      L('> '+m.type);
+    }
+  };
+
+  ws.onerror=function(){L('WS ERR');S('Connection error',1);cb(false);};
+  ws.onclose=function(e){L('WS CLOSE '+e.code);if(on){stop();S('Disconnected');}};
+}
+
+// ═══ RECORDING ═══
+async function startRec(){
+  try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});}
+  catch(e){S('Mic blocked — allow in browser',1);L('MIC FAIL: '+e.message);return false;}
+
+  var mime='audio/webm;codecs=opus';
+  if(!MediaRecorder.isTypeSupported(mime)){mime='audio/webm';if(!MediaRecorder.isTypeSupported(mime))mime='';}
+  L('MIME: '+(mime||'default'));
+
+  try{
+    rec=new MediaRecorder(stream,mime?{mimeType:mime}:{});
+    rec.ondataavailable=function(e){
+      if(e.data.size>0&&ws&&ws.readyState===1&&!speaking){
+        var r=new FileReader();
+        r.onloadend=function(){var b=r.result.split(',')[1];if(b)ws.send(JSON.stringify({type:'audio_input',data:b}));};
+        r.readAsDataURL(e.data);
+      }
+    };
+    rec.start(200);
+    L('REC started');
+    S('Listening… speak to Meena');
+    return true;
+  }catch(e){L('REC ERR: '+e.message);return false;}
+}
+
+function stopRec(){
+  if(rec&&rec.state!=='inactive')try{rec.stop();}catch(e){}
+  if(stream){stream.getTracks().forEach(function(t){t.stop();});stream=null;}
+}
+
+// ═══ MAIN TOGGLE ═══
+function stop(){on=false;speaking=false;chunks=[];stopRec();if(ws)try{ws.close();}catch(e){};btn('off');S('Tap mic to start');}
+
+async function go(){
+  // Init AudioContext on user click (required for autoplay)
+  initAudio();
+
+  if(on||speaking){stop();return;}
+
+  on=true;btn('on');
+
+  connect(function(ok){
+    if(!ok){stop();return;}
+    startRec().then(function(ok){if(!ok)stop();});
+  });
+}
+</script>
+</body>
+</html>
